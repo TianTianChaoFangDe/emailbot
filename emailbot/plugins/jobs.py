@@ -1,13 +1,13 @@
 """定时任务: 邮件轮询 / 每日 9:00 日报 / 每分钟提醒扫描(+询问过期)。
 
 提醒用每分钟扫描 + reminded_at 幂等标记实现: 重启不漏, 不重发。
-启动后 15 秒先跑一轮邮件轮询, 不用干等 30 分钟。
+NapCat 每次连上时触发一轮邮件轮询并重发未送达的询问 —— 不用干等 30 分钟,
+也避免 QQ 通道还没建立时通知/询问丢失。
 """
 
 from datetime import datetime, timedelta
 
 from nonebot import get_driver, require
-from nonebot.log import logger
 
 require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler  # noqa: E402
@@ -50,10 +50,14 @@ async def job_reminder_scan():
     await askq.expire_old()
 
 
-@get_driver().on_startup
-async def _poll_soon_after_boot():
-    run_at = datetime.now() + timedelta(seconds=15)
+@get_driver().on_bot_connect
+async def _on_bot_connect(bot):
+    # NapCat 连上 10 秒后跑一轮邮件轮询; 重发可能在掉线期间丢失的询问
     scheduler.add_job(
-        pipeline.poll_once, "date", run_date=run_at, id="mail_poll_boot"
+        pipeline.poll_once,
+        "date",
+        run_date=datetime.now() + timedelta(seconds=10),
+        id="mail_poll_on_connect",
+        replace_existing=True,
     )
-    logger.info(f"启动后首次邮件轮询安排在 {run_at:%H:%M:%S}")
+    await askq.renotify_active()

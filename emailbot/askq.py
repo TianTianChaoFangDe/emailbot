@@ -73,6 +73,13 @@ async def promote_next() -> None:
     await notify(text + ASK_HINT)
 
 
+async def renotify_active() -> None:
+    """bot 重新连上 QQ 时, 重发当前 pending 问题(掉线期间的通知可能已丢失)。"""
+    q = await active()
+    if q:
+        await notify(q.question_text + ASK_HINT)
+
+
 async def resolve(qid: int, when: datetime, answer_text: str) -> ScheduleEvent | None:
     """用户给出了确定时间: 落库为日程并推进队列。返回新建的日程。"""
     async with SessionFactory() as s:
