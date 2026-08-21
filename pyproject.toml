@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emailbot"
+version = "0.1.0"
+description = "QQ 邮箱求职助手 Bot: 轮询 QQ 邮箱, 推送求职邮件, 维护日程"
+requires-python = ">=3.11"
+dependencies = [
+    "nonebot2[fastapi]>=2.5,<3",           # 机器人框架 + 反向 WS/HTTP 服务端
+    "nonebot-adapter-onebot>=2.4.6,<3",    # OneBot v11 适配器(对接 NapCat)
+    "nonebot-plugin-apscheduler>=0.5,<0.6",# 定时任务
+    "sqlmodel>=0.0.39",                    # ORM (Pydantic v2)
+    "aiosqlite>=0.22",                     # SQLAlchemy 异步 sqlite 驱动
+    "openai>=3,<4",                        # DeepSeek(OpenAI 兼容接口)
+    "imapclient>=3.1,<4",                  # IMAP 客户端(同步, 需 to_thread)
+    "beautifulsoup4>=4.12",                # HTML 邮件转纯文本
+    "lxml>=5",                             # bs4 解析后端
+    "pydantic-settings>=2",                # 业务配置读取 .env
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[tool.nonebot]
+
+[tool.nonebot.plugins]
+"@local" = [
+    "emailbot.plugins.commands",
+    "emailbot.plugins.chat",
+    "emailbot.plugins.jobs",
+]
+
+[tool.setuptools.packages.find]
+include = ["emailbot*"]

@@ -1,0 +1,162 @@
+"""LLM prompt 模板与输出模型(Pydantic 校验)。
+
+两个 prompt 都包含 "JSON" 字样(DeepSeek JSON mode 硬性要求),
+且都注入当前时间(DeepSeek 无时间概念, 相对时间换算全靠它)。
+"""
+
+from pydantic import BaseModel
+
+from .timetz import now_prompt
+
+# ---------------------------------------------------------------- 邮件分类
+
+CLASSIFY_SYSTEM = """你是求职邮件分析助手。用户正在找工作, 邮箱会收到各类邮件。
+你的任务: 判断邮件是否与求职/招聘相关, 提取关键信息, 并识别其中"需要用户在特定时间做的事"(日程事件)。
+只输出一个 JSON 对象, 不要输出任何其他内容。
+
+【判定为求职相关】的邮件包括: 简历投递确认、初筛/简历筛选结果、测评邀请、笔试邀请、
+AI Coding/在线编程测试、AI 面试、面试邀请(电话/视频/现场)、offer、拒信、
+以及招聘平台(BOSS直聘/牛客/智联招聘/前程无忧/猎聘/实习僧/拉勾等)发来的职位沟通邮件。
+广告推广、营销订阅、新闻资讯、账单、验证码等不算求职相关。
+
+【时间规则】
+- 所有时间一律转换为带 +08:00 时区的 ISO 8601 格式, 如 2026-08-25T14:00:00+08:00
+- 相对时间(如"本周五""明天""3天后")根据 user 消息中提供的当前时间换算; 缺少年份时按最近未来的合理日期
+- 没有明确时间就为 null
+- time_confidence 取值: exact=精确到具体时间点; window=一个时间窗口/有效期(如"8月25日14:00-16:00进入会议""链接48小时内有效"); vague=模糊(如"本周内完成测评"); none=无时间
+- duration_minutes: 若邮件提到活动时长(如"笔试时长90分钟""面试约30分钟"), 填分钟数整数, 否则 null
+- 一封邮件可能含多个事件(如实为测评+笔试), 全部列出
+
+【输出 JSON 格式】
+{
+  "is_job_related": true 或 false,
+  "category": "screening|written_test|ai_coding|ai_interview|interview_invite|assessment|offer|reject|other_job|not_job",
+  "company": "公司名或 null",
+  "position": "岗位名或 null",
+  "summary": "一句话中文要点(50字以内)",
+  "action_required": "用户需要做什么, 没有则 null",
+  "events": [
+    {
+      "title": "简短事件名, 如 字节跳动后端岗笔试",
+      "type": "written_test|ai_coding|ai_interview|interview|assessment|other",
+      "start": "ISO 8601(+08:00) 或 null",
+      "end": "ISO 8601(+08:00) 或 null",
+      "location_or_url": "会议链接/地址/平台或 null",
+      "duration_minutes": 整数或 null,
+      "time_confidence": "exact|window|vague|none"
+    }
+  ]
+}
+不相关时 events 输出空数组。"""
+
+CLASSIFY_USER = """当前时间: {now}
+
+请分析以下邮件, 按规则输出 JSON。
+
+发件人: {sender}
+主题: {subject}
+日期: {date}
+
+正文:
+{text}"""
+
+
+class ClassifyEvent(BaseModel):
+    title: str
+    type: str = "other"
+    start: str | None = None
+    end: str | None = None
+    location_or_url: str | None = None
+    duration_minutes: int | None = None
+    time_confidence: str = "none"
+
+
+class ClassifyResult(BaseModel):
+    is_job_related: bool
+    category: str = "other_job"
+    company: str | None = None
+    position: str | None = None
+    summary: str = ""
+    action_required: str | None = None
+    events: list[ClassifyEvent] = []
+
+
+def classify_user(sender: str, subject: str, date: str, text: str) -> str:
+    return CLASSIFY_USER.format(now=now_prompt(), sender=sender, subject=subject, date=date, text=text)
+
+
+CATEGORY_LABELS = {
+    "screening": "简历初筛",
+    "written_test": "笔试",
+    "ai_coding": "AI Coding",
+    "ai_interview": "AI 面试",
+    "interview_invite": "面试邀请",
+    "assessment": "测评",
+    "offer": "Offer",
+    "reject": "拒信",
+    "other_job": "求职相关",
+    "not_job": "无关",
+}
+
+# ---------------------------------------------------------------- 私聊意图路由
+
+INTENT_SYSTEM = """你是日程助手的意图识别器。用户通过 QQ 私聊与机器人交互。判断用户意图, 只输出一个 JSON 对象。
+
+【意图类型】
+- answer_pending: 当前有一个等待回答的问题(会附在 user 消息里), 用户在回答该问题, 通常是一个时间安排
+- add_schedule: 用户主动添加日程(如"明天下午3点字节面试""周五晚上7点到9点团建")
+- query_schedule: 用户查询日程(如"今天有什么安排""这周的日程")
+- cancel_pending: 用户想跳过/取消当前等待回答的问题(如"取消""算了""不用安排")
+- other: 其他闲聊或无法理解的内容
+
+【时间规则】
+- 所有时间一律转换为带 +08:00 时区的 ISO 8601 格式
+- 相对时间根据 user 消息中提供的当前时间换算(如"明晚7点" -> 明天19:00)
+- answer_pending 时把用户给的时间解析到 answer_datetime
+- add_schedule 时尽量解析出 event 的 start; 用户没给时间则 start 为 null
+
+【输出 JSON 格式】
+{
+  "intent": "answer_pending|add_schedule|query_schedule|cancel_pending|other",
+  "answer_datetime": "ISO 8601(+08:00) 或 null",
+  "event": {
+    "title": "简短事件名",
+    "event_type": "written_test|ai_coding|ai_interview|interview|assessment|other",
+    "start": "ISO 8601(+08:00) 或 null",
+    "end": "ISO 8601(+08:00) 或 null",
+    "location_or_url": "或 null",
+    "notes": "或 null"
+  } 或 null,
+  "query_scope": "today|tomorrow|week 或 null",
+  "reply": "给用户的简短中文回复(一句话, 仅在需要额外说明时有用, 否则留空字符串)"
+}"""
+
+INTENT_USER = """当前时间: {now}
+{pending}
+用户消息: {text}"""
+
+
+class IntentEvent(BaseModel):
+    title: str
+    event_type: str = "other"
+    start: str | None = None
+    end: str | None = None
+    location_or_url: str | None = None
+    notes: str | None = None
+
+
+class IntentResult(BaseModel):
+    intent: str = "other"
+    answer_datetime: str | None = None
+    event: IntentEvent | None = None
+    query_scope: str | None = None
+    reply: str = ""
+
+
+def intent_user(text: str, pending_question: str | None) -> str:
+    pending = (
+        f"当前有一个等待回答的问题: 「{pending_question}」(若用户在回答它, intent 应为 answer_pending; 若用户明显在说别的事, 按实际意图判断)"
+        if pending_question
+        else "当前没有等待回答的问题。"
+    )
+    return INTENT_USER.format(now=now_prompt(), pending=pending, text=text)
