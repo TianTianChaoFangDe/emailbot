@@ -29,6 +29,24 @@ def get_client() -> AsyncOpenAI:
     return _client
 
 
+async def chat_text(system: str, user: str, temperature: float = 0.8) -> str | None:
+    """自由文本生成(日报寄语/提醒建议等); 失败返回 None, 调用方降级。"""
+    settings = get_settings()
+    try:
+        resp = await get_client().chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=temperature,
+        )
+        return (resp.choices[0].message.content or "").strip() or None
+    except Exception as e:
+        logger.warning(f"LLM 文本生成失败: {e!r}")
+        return None
+
+
 def _loads_loose(text: str) -> dict | None:
     """严格解析失败时, 截取首个 { 到末个 } 再试一次。"""
     try:

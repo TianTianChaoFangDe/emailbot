@@ -14,10 +14,15 @@ from nonebot_plugin_apscheduler import scheduler  # noqa: E402
 
 from .. import askq, events, pipeline  # noqa: E402
 from ..config import get_settings  # noqa: E402
+from ..llm import chat_text  # noqa: E402
 from ..notify import notify  # noqa: E402
+from ..prompts import DIGEST_SYSTEM, REMIND_SYSTEM, digest_user, remind_user  # noqa: E402
 from ..timetz import now_local  # noqa: E402
 
 _settings = get_settings()
+
+# 提醒附 AI 建议的日程类型
+_TIP_TYPES = {"written_test", "ai_coding", "ai_interview", "interview", "assessment"}
 
 
 @scheduler.scheduled_job(
@@ -37,15 +42,25 @@ async def job_daily_digest():
     n = now_local()
     day_start = n.replace(hour=0, minute=0, second=0, microsecond=0)
     evs = await events.events_between(day_start, day_start + timedelta(days=1))
-    await notify(events.render_today(evs))
+    text = events.render_today(evs)
+    if evs:
+        # AI 晨间寄语(失败则降级为纯日程列表)
+        evs_text = "\n".join(events.render_event(ev) for ev in evs)
+        note = await chat_text(DIGEST_SYSTEM, digest_user(evs_text))
+        if note:
+            text += f"\n\n💡 {note}"
+    await notify(text)
 
 
 @scheduler.scheduled_job("interval", minutes=1, id="reminder_scan", max_instances=1, coalesce=True)
 async def job_reminder_scan():
     for ev in await events.due_reminders():
-        if await notify(
-            f"⏰ {ev.remind_before_minutes} 分钟后开始:\n{events.render_event(ev)}"
-        ):
+        text = f"⏰ {ev.remind_before_minutes} 分钟后开始:\n{events.render_event(ev)}"
+        if ev.event_type in _TIP_TYPES:
+            tip = await chat_text(REMIND_SYSTEM, remind_user(events.render_event(ev)))
+            if tip:
+                text += f"\n💡 {tip}"
+        if await notify(text):
             await events.mark_reminded(ev.id)
     await askq.expire_old()
 

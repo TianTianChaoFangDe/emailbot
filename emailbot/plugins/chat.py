@@ -43,6 +43,18 @@ async def _say(text: str) -> None:
     await chat.finish(text)
 
 
+def _flavor(result: IntentResult) -> str:
+    """LLM 给动作类意图附带的情绪/提醒文案(reply 字段)。"""
+    r = (result.reply or "").strip()
+    return f"\n{r}" if r else ""
+
+
+async def _conflict_warn(ev: ScheduleEvent) -> str:
+    return events.conflict_note(
+        await events.find_conflicts(ev.start_time, ev.end_time, exclude_id=ev.id)
+    )
+
+
 async def _get_quoted_text(event: PrivateMessageEvent, bot: Bot) -> str | None:
     """用户引用回复了历史消息时, 取被引用消息的纯文本内容。"""
     for seg in event.message:
@@ -165,7 +177,7 @@ async def _(event: PrivateMessageEvent, bot: Bot):
             if not done:
                 await _say("该问题已失效。")
             if result.confirm:
-                await _say(f"🗑 已删除日程:\n{events.render_event(ev)}")
+                await _say(f"🗑 已删除日程:\n{events.render_event(ev)}{_flavor(result)}")
             await _say("好的, 不删了 ✅")
 
         # create / update_time 时间问题
@@ -182,9 +194,10 @@ async def _(event: PrivateMessageEvent, bot: Bot):
         ev, action = await askq.resolve(target_q.id, when, text)
         if ev is None:
             await _say("该问题已失效。")
+        warn = await _conflict_warn(ev)
         if action == "update_time":
-            await _say(f"✅ 已改期:\n{events.render_event(ev)}")
-        await _say(f"✅ 已写入日程:\n{events.render_event(ev)}")
+            await _say(f"✅ 已改期:\n{events.render_event(ev)}{warn}{_flavor(result)}")
+        await _say(f"✅ 已写入日程:\n{events.render_event(ev)}{warn}{_flavor(result)}")
 
     # 2. 取消等待中的问题
     if intent == "cancel_pending":
@@ -201,7 +214,8 @@ async def _(event: PrivateMessageEvent, bot: Bot):
             if start < now - timedelta(minutes=5):
                 await _say("这个时间已经过去了诶, 说一个未来的时间吧")
             ev = await events.update_event(bound_ev.id, start_time=start, end_time=end)
-            await _say(f"✅ 已改期:\n{events.render_event(ev)}")
+            warn = await _conflict_warn(ev)
+            await _say(f"✅ 已改期:\n{events.render_event(ev)}{warn}{_flavor(result)}")
         if start is None:
             # 复用询问队列: 先记下来, 问用户时间
             await askq.enqueue(
@@ -227,7 +241,8 @@ async def _(event: PrivateMessageEvent, bot: Bot):
             notes=ie.notes,
             source="manual",
         )
-        await _say(f"✅ 已写入日程:\n{events.render_event(ev)}")
+        warn = await _conflict_warn(ev)
+        await _say(f"✅ 已写入日程:\n{events.render_event(ev)}{warn}{_flavor(result)}")
 
     # 4. 修改日程
     if intent == "update_schedule":
@@ -248,7 +263,8 @@ async def _(event: PrivateMessageEvent, bot: Bot):
         ev = await events.update_event(target.id, start_time=new_start, end_time=new_end)
         if ev is None:
             await _say("该日程已失效。")
-        await _say(f"✅ 已改期:\n{events.render_event(ev)}")
+        warn = await _conflict_warn(ev)
+        await _say(f"✅ 已改期:\n{events.render_event(ev)}{warn}{_flavor(result)}")
 
     # 5. 删除日程(先确认)
     if intent == "delete_schedule":

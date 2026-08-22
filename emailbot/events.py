@@ -199,6 +199,36 @@ def match_event_by_text(
     return None
 
 
+async def find_conflicts(
+    start: datetime, end: datetime | None, exclude_id: int | None = None
+) -> list[ScheduleEvent]:
+    """找出与 [start, end) 时间重叠的进行中日程。end 为空按 1 小时估算。"""
+    e = end or start + timedelta(hours=1)
+    async with SessionFactory() as s:
+        rows = await s.exec(
+            select(ScheduleEvent)
+            .where(ScheduleEvent.status == "active")
+            .where(ScheduleEvent.start_time >= start - timedelta(days=1))
+            .where(ScheduleEvent.start_time <= e + timedelta(days=1))
+        )
+        out = []
+        for ev in rows.all():
+            if exclude_id is not None and ev.id == exclude_id:
+                continue
+            ev_end = ev.end_time or ev.start_time + timedelta(hours=1)
+            if ev.start_time < e and start < ev_end:
+                out.append(ev)
+        return out
+
+
+def conflict_note(conflicts: list[ScheduleEvent]) -> str:
+    """冲突提醒文案; 无冲突返回空串。"""
+    if not conflicts:
+        return ""
+    items = "、".join(f"「{c.title}」({fmt(c.start_time)})" for c in conflicts)
+    return f"\n⚠️ 时间冲突: 和 {items} 撞了"
+
+
 async def due_reminders() -> list[ScheduleEvent]:
     """到达提醒窗口且未提醒的日程: start - remind_before <= now < start。"""
     n = now_local()

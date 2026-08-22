@@ -81,7 +81,7 @@ def _needs_ask(e: ClassifyEvent, start, end) -> bool:
 
 
 def _build_notification(
-    result: ClassifyResult, added: list, asked: list[str]
+    result: ClassifyResult, added: list[tuple], asked: list[str]
 ) -> str:
     label = CATEGORY_LABELS.get(result.category, "求职相关")
     lines = [f"📧 求职邮件 | {label}"]
@@ -93,15 +93,20 @@ def _build_notification(
         lines.append(f"💬 {result.summary}")
     if result.action_required:
         lines.append(f"📌 {result.action_required}")
-    for ev in added:
+    for ev, conflicts in added:
         lines.append(f"🗓 已写入日程: {ev.title} @ {fmt(ev.start_time)}")
+        if conflicts:
+            items = "、".join(f"「{c.title}」({fmt(c.start_time)})" for c in conflicts)
+            lines.append(f"    ⚠️ 和 {items} 时间撞了")
     for t in asked:
         lines.append(f"❓ 时间待定: {t}(稍后会问你安排)")
     return "\n".join(lines)
 
 
-async def _handle_events(result: ClassifyResult, mail_id: int) -> tuple[list, list[str]]:
-    """返回 (已建日程列表, 已入队询问的标题列表)。"""
+async def _handle_events(
+    result: ClassifyResult, mail_id: int
+) -> tuple[list[tuple], list[str]]:
+    """返回 ([(新日程, 冲突日程列表)], [已入队询问的标题])。"""
     settings = get_settings()
     now = now_local()
     added, asked = [], []
@@ -147,7 +152,8 @@ async def _handle_events(result: ClassifyResult, mail_id: int) -> tuple[list, li
                 source="email",
                 source_mail_id=mail_id,
             )
-            added.append(ev)
+            conflicts = await events.find_conflicts(start, end, exclude_id=ev.id)
+            added.append((ev, conflicts))
     return added, asked
 
 
