@@ -48,6 +48,10 @@ cp .env.example .env   # 然后编辑 .env 填入: 主号QQ / 邮箱 / 授权码
 python bot.py
 ```
 
+## 云端部署
+
+部署到云服务器(Docker Compose 一键编排 bot + NapCat, 含购买服务器指引): 见 [DEPLOY.md](DEPLOY.md)。
+
 ## 使用
 
 主号给 Bot 小号发私聊:

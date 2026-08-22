@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# 部署手册含服务器细节, 只留本地
+DEPLOY.md
