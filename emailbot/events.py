@@ -121,6 +121,70 @@ def render_week(events: list[ScheduleEvent]) -> str:
     return render_events("📅 未来 7 天日程", events, "未来 7 天没有日程安排 🎉")
 
 
+async def upcoming_events(days: int = 60, limit: int = 20) -> list[ScheduleEvent]:
+    """今天起的进行中日程, 供 LLM 定位修改/删除目标(编号与列表顺序一致)。"""
+    n = now_local()
+    day_start = n.replace(hour=0, minute=0, second=0, microsecond=0)
+    async with SessionFactory() as s:
+        rows = await s.exec(
+            select(ScheduleEvent)
+            .where(ScheduleEvent.status == "active")
+            .where(ScheduleEvent.start_time >= day_start)
+            .where(ScheduleEvent.start_time < day_start + timedelta(days=days))
+            .order_by(ScheduleEvent.start_time)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+
+async def update_event(
+    event_id: int,
+    *,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    title: str | None = None,
+    location_or_url: str | None = None,
+    notes: str | None = None,
+    keep_duration: bool = True,
+) -> ScheduleEvent | None:
+    """修改日程。只改 start_time 且原来有 end_time 时, 按原时长平移结束时间。
+    开始时间变化会重置提醒标记(reminded_at), 让新时间重新进入提醒窗口。"""
+    async with SessionFactory() as s:
+        ev = await s.get(ScheduleEvent, event_id)
+        if not ev or ev.status != "active":
+            return None
+        if start_time is not None:
+            if keep_duration and end_time is None and ev.end_time is not None:
+                end_time = ev.end_time + (start_time - ev.start_time)
+            ev.start_time = start_time
+            ev.reminded_at = None
+        if end_time is not None:
+            ev.end_time = end_time
+        if title:
+            ev.title = title
+        if location_or_url:
+            ev.location_or_url = location_or_url
+        if notes:
+            ev.notes = notes
+        s.add(ev)
+        await s.commit()
+        await s.refresh(ev)
+        return ev
+
+
+async def cancel_event(event_id: int) -> ScheduleEvent | None:
+    """软删除日程(status=cancelled, 留痕且不再提醒/展示)。"""
+    async with SessionFactory() as s:
+        ev = await s.get(ScheduleEvent, event_id)
+        if not ev or ev.status != "active":
+            return None
+        ev.status = "cancelled"
+        s.add(ev)
+        await s.commit()
+        await s.refresh(ev)
+        return ev
+
+
 async def due_reminders() -> list[ScheduleEvent]:
     """到达提醒窗口且未提醒的日程: start - remind_before <= now < start。"""
     n = now_local()

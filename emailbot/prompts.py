@@ -103,22 +103,33 @@ CATEGORY_LABELS = {
 INTENT_SYSTEM = """你是日程助手的意图识别器。用户通过 QQ 私聊与机器人交互。判断用户意图, 只输出一个 JSON 对象。
 
 【意图类型】
-- answer_pending: 当前有一个等待回答的问题(会附在 user 消息里), 用户在回答该问题, 通常是一个时间安排
+- answer_pending: 当前有一个等待回答的问题(附在 user 消息里), 用户在回答该问题:
+  · 若问题在询问时间 -> 把用户给的时间解析到 answer_datetime
+  · 若问题是确认类(如"确认删除吗") -> 用 confirm 字段回答(true=确认, false=不确认/算了)
 - add_schedule: 用户主动添加日程(如"明天下午3点字节面试""周五晚上7点到9点团建")
+- update_schedule: 用户修改已有日程(如"把字节的面试改到后天下午3点""周五笔试推迟一小时")
+- delete_schedule: 用户删除已有日程(如"删除明天的笔试""取消周五的面试")
 - query_schedule: 用户查询日程(如"今天有什么安排""这周的日程")
 - cancel_pending: 用户想跳过/取消当前等待回答的问题(如"取消""算了""不用安排")
 - other: 其他闲聊或无法理解的内容
 
+【update/delete 的目标定位】
+user 消息里附带一个带编号的当前日程列表。根据用户描述(公司/岗位/类型/时间等线索)
+选出最匹配的一条, 把编号填到 target_index; 无法确定则填 null。
+- update_schedule: 用户给的新时间填进 event.start/end; 用户没给新时间则 event.start 为 null;
+  对"推迟1小时"这类相对修改, 根据列表中该日程的当前时间计算出新的绝对时间
+- delete_schedule: 只需 target_index
+
 【时间规则】
 - 所有时间一律转换为带 +08:00 时区的 ISO 8601 格式
 - 相对时间根据 user 消息中提供的当前时间换算(如"明晚7点" -> 明天19:00)
-- answer_pending 时把用户给的时间解析到 answer_datetime
-- add_schedule 时尽量解析出 event 的 start; 用户没给时间则 start 为 null
 
 【输出 JSON 格式】
 {
-  "intent": "answer_pending|add_schedule|query_schedule|cancel_pending|other",
+  "intent": "answer_pending|add_schedule|update_schedule|delete_schedule|query_schedule|cancel_pending|other",
   "answer_datetime": "ISO 8601(+08:00) 或 null",
+  "confirm": true 或 false 或 null,
+  "target_index": 整数编号或 null,
   "event": {
     "title": "简短事件名",
     "event_type": "written_test|ai_coding|ai_interview|interview|assessment|other",
@@ -133,6 +144,7 @@ INTENT_SYSTEM = """你是日程助手的意图识别器。用户通过 QQ 私聊
 
 INTENT_USER = """当前时间: {now}
 {pending}
+{events}
 用户消息: {text}"""
 
 
@@ -148,15 +160,24 @@ class IntentEvent(BaseModel):
 class IntentResult(BaseModel):
     intent: str = "other"
     answer_datetime: str | None = None
+    confirm: bool | None = None
+    target_index: int | None = None
     event: IntentEvent | None = None
     query_scope: str | None = None
     reply: str = ""
 
 
-def intent_user(text: str, pending_question: str | None) -> str:
+def intent_user(
+    text: str, pending_question: str | None, events_text: str | None = None
+) -> str:
     pending = (
         f"当前有一个等待回答的问题: 「{pending_question}」(若用户在回答它, intent 应为 answer_pending; 若用户明显在说别的事, 按实际意图判断)"
         if pending_question
         else "当前没有等待回答的问题。"
     )
-    return INTENT_USER.format(now=now_prompt(), pending=pending, text=text)
+    events_block = (
+        f"当前日程列表(编号供 target_index 使用):\n{events_text}"
+        if events_text
+        else "当前没有日程。"
+    )
+    return INTENT_USER.format(now=now_prompt(), pending=pending, events=events_block, text=text)

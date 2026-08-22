@@ -80,12 +80,17 @@ async def renotify_active() -> None:
         await notify(q.question_text + ASK_HINT)
 
 
-async def resolve(qid: int, when: datetime, answer_text: str) -> ScheduleEvent | None:
-    """用户给出了确定时间: 落库为日程并推进队列。返回新建的日程。"""
+async def resolve(
+    qid: int, when: datetime, answer_text: str
+) -> tuple[ScheduleEvent | None, str]:
+    """用户给出了确定时间。按草稿 action 分发:
+    - create(默认): 新建日程
+    - update_time: 把指定日程改到该时间(保留原时长平移)
+    返回 (日程, action); 问题已失效返回 (None, "")。"""
     async with SessionFactory() as s:
         q = await s.get(PendingQuestion, qid)
         if not q or q.status != "pending":
-            return None
+            return None, ""
         draft = json.loads(q.event_draft)
         source_mail_id = q.source_mail_id
         q.status = "answered"
@@ -93,6 +98,12 @@ async def resolve(qid: int, when: datetime, answer_text: str) -> ScheduleEvent |
         q.answer_text = answer_text
         s.add(q)
         await s.commit()
+
+    action = draft.get("action", "create")
+    if action == "update_time":
+        ev = await events.update_event(draft["event_id"], start_time=when)
+        await promote_next()
+        return ev, action
 
     duration = draft.pop("duration_minutes", None)
     end = when + timedelta(minutes=duration) if duration else None
@@ -109,7 +120,29 @@ async def resolve(qid: int, when: datetime, answer_text: str) -> ScheduleEvent |
         source_mail_id=source_mail_id,
     )
     await promote_next()
-    return ev
+    return ev, action
+
+
+async def resolve_confirm(
+    qid: int, confirmed: bool, answer_text: str
+) -> tuple[bool, ScheduleEvent | None]:
+    """处理确认类问题(目前是删除确认)。返回 (是否已了结, 涉及的事件)。"""
+    async with SessionFactory() as s:
+        q = await s.get(PendingQuestion, qid)
+        if not q or q.status != "pending":
+            return False, None
+        draft = json.loads(q.event_draft)
+        q.status = "answered" if confirmed else "cancelled"
+        q.answered_at = now_local() if confirmed else None
+        q.answer_text = answer_text
+        s.add(q)
+        await s.commit()
+
+    ev = None
+    if confirmed and draft.get("action") == "delete":
+        ev = await events.cancel_event(draft["event_id"])
+    await promote_next()
+    return True, ev
 
 
 async def cancel_active() -> PendingQuestion | None:

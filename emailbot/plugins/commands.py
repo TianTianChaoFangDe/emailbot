@@ -25,8 +25,9 @@ HELP_TEXT = """📮 求职邮件/日程小助手
 · 帮助 —— 显示本说明
 
 也可以直接和我说话, 如:
-「明天下午3点字节跳动后端岗面试」
-「周五 19:00-21:00 笔试」"""
+「明天下午3点字节跳动后端岗面试」 —— 加日程
+「把字节的面试改到后天下午3点」 —— 改日程
+「删除明天的笔试」 —— 删日程(会先让你确认)"""
 
 
 async def _is_master(event: Event) -> bool:
@@ -36,12 +37,20 @@ async def _is_master(event: Event) -> bool:
     )
 
 
+async def _is_exact_cancel(event: Event) -> bool:
+    # 「取消明天的笔试」应走删除意图, 只有单独的「取消」才取消待答问题
+    return (
+        isinstance(event, PrivateMessageEvent)
+        and event.get_plaintext().strip() == "取消"
+    )
+
+
 MASTER = Rule(_is_master)
 
 help_cmd = on_command("帮助", aliases={"help", "菜单"}, rule=MASTER, priority=1, block=True)
 today_cmd = on_command("今日", aliases={"今天"}, rule=MASTER, priority=1, block=True)
 week_cmd = on_command("日程", aliases={"安排", "本周"}, rule=MASTER, priority=1, block=True)
-cancel_cmd = on_command("取消", rule=MASTER, priority=1, block=True)
+cancel_cmd = on_command("取消", rule=Rule(_is_master, _is_exact_cancel), priority=1, block=True)
 
 
 @help_cmd.handle()
