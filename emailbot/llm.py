@@ -43,17 +43,27 @@ def _loads_loose(text: str) -> dict | None:
         return None
 
 
-async def chat_json(system: str, user: str, model: type[T]) -> T | None:
-    """调用 DeepSeek JSON mode 并用 Pydantic 校验; 失败重试一次, 仍失败返回 None。"""
+async def chat_json(
+    system: str,
+    user: str,
+    model: type[T],
+    history: list[dict] | None = None,
+) -> T | None:
+    """调用 DeepSeek JSON mode 并用 Pydantic 校验; 失败重试一次, 仍失败返回 None。
+
+    history: 之前的对话消息([{"role": ..., "content": ...}]), 插在 system 与
+    当前 user 消息之间。
+    """
     settings = get_settings()
+    messages = [{"role": "system", "content": system}]
+    if history:
+        messages += history
+    messages.append({"role": "user", "content": user})
     for attempt in range(2):
         try:
             resp = await get_client().chat.completions.create(
                 model=settings.deepseek_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.2,
             )

@@ -101,6 +101,7 @@ CATEGORY_LABELS = {
 # ---------------------------------------------------------------- 私聊意图路由
 
 INTENT_SYSTEM = """你是日程助手的意图识别器。用户通过 QQ 私聊与机器人交互。判断用户意图, 只输出一个 JSON 对象。
+当前 user 消息之前可能附带最近的对话历史, 供你理解指代(如"那个""它""这个面试")。
 
 【意图类型】
 - answer_pending: 当前有一个等待回答的问题(附在 user 消息里), 用户在回答该问题:
@@ -145,6 +146,7 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
 INTENT_USER = """当前时间: {now}
 {pending}
 {events}
+{quote}
 用户消息: {text}"""
 
 
@@ -168,7 +170,10 @@ class IntentResult(BaseModel):
 
 
 def intent_user(
-    text: str, pending_question: str | None, events_text: str | None = None
+    text: str,
+    pending_question: str | None,
+    events_text: str | None = None,
+    quote: str | None = None,
 ) -> str:
     pending = (
         f"当前有一个等待回答的问题: 「{pending_question}」(若用户在回答它, intent 应为 answer_pending; 若用户明显在说别的事, 按实际意图判断)"
@@ -180,4 +185,11 @@ def intent_user(
         if events_text
         else "当前没有日程。"
     )
-    return INTENT_USER.format(now=now_prompt(), pending=pending, events=events_block, text=text)
+    quote_block = (
+        f"用户引用回复了一条历史消息: 「{quote}」(当前消息很可能是针对它的操作或评论)"
+        if quote
+        else "用户没有引用历史消息。"
+    )
+    return INTENT_USER.format(
+        now=now_prompt(), pending=pending, events=events_block, quote=quote_block, text=text
+    )

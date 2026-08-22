@@ -4,9 +4,10 @@ from datetime import timedelta
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Event, PrivateMessageEvent
+from nonebot.matcher import Matcher
 from nonebot.rule import Rule
 
-from .. import askq, events
+from .. import askq, events, history
 from ..config import get_settings
 from ..timetz import now_local
 
@@ -53,9 +54,15 @@ week_cmd = on_command("日程", aliases={"安排", "本周"}, rule=MASTER, prior
 cancel_cmd = on_command("取消", rule=Rule(_is_master, _is_exact_cancel), priority=1, block=True)
 
 
+async def _say(matcher: Matcher, text: str) -> None:
+    """回复并记入对话历史。"""
+    await history.record_bot(text)
+    await matcher.finish(text)
+
+
 @help_cmd.handle()
 async def _():
-    await help_cmd.finish(HELP_TEXT)
+    await _say(help_cmd, HELP_TEXT)
 
 
 @today_cmd.handle()
@@ -63,7 +70,7 @@ async def _():
     n = now_local()
     day_start = n.replace(hour=0, minute=0, second=0, microsecond=0)
     evs = await events.events_between(day_start, day_start + timedelta(days=1))
-    await today_cmd.finish(events.render_today(evs))
+    await _say(today_cmd, events.render_today(evs))
 
 
 @week_cmd.handle()
@@ -71,13 +78,13 @@ async def _():
     n = now_local()
     day_start = n.replace(hour=0, minute=0, second=0, microsecond=0)
     evs = await events.events_between(day_start, day_start + timedelta(days=7))
-    await week_cmd.finish(events.render_week(evs))
+    await _say(week_cmd, events.render_week(evs))
 
 
 @cancel_cmd.handle()
 async def _():
     q = await askq.cancel_active()
     if q:
-        await cancel_cmd.finish("好的, 已跳过这个问题 ✅")
+        await _say(cancel_cmd, "好的, 已跳过这个问题 ✅")
     else:
-        await cancel_cmd.finish("当前没有等待回答的问题。")
+        await _say(cancel_cmd, "当前没有等待回答的问题。")

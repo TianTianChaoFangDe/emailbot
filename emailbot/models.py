@@ -53,6 +53,15 @@ class ScheduleEvent(SQLModel, table=True):
     created_at: datetime
 
 
+class ChatMessage(SQLModel, table=True):
+    """与主号的对话历史(含 bot 主动推送), 供意图路由注入上下文。"""
+
+    id: int | None = Field(default=None, primary_key=True)
+    role: str            # user / assistant(bot)
+    text: str
+    created_at: datetime
+
+
 class PendingQuestion(SQLModel, table=True):
     """待回答询问(单 active 队列): 时间不确定/窗口过大时向用户发问。
 
