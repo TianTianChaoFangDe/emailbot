@@ -1,0 +1,32 @@
+# emailbot 云端编排: bot(NoneBot2) + napcat(QQ 小号客户端)
+#
+# 网络说明:
+#   - 两个容器在同一个 compose 内网, 按服务名互访
+#   - bot 的 8080 不发布到宿主机, 只有 napcat 能连 (ws://bot:8080/onebot/v11/ws)
+#   - napcat 的 WebUI 6099 只绑宿主机 127.0.0.1, 通过 SSH 隧道访问, 不暴露公网
+#   - IMAP / DeepSeek / QQ 服务器全是出站连接, 服务器安全组只需放行 SSH(22)
+
+services:
+  bot:
+    build: .
+    container_name: emailbot
+    restart: always
+    env_file: .env
+    environment:
+      # 强制覆盖 .env 里的 HOST=127.0.0.1, 否则 napcat 容器连不进来
+      HOST: 0.0.0.0
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/app/data        # SQLite 持久化
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:6099:6099"   # WebUI, 仅本机 + SSH 隧道可达
+    volumes:
+      - ./napcat/qq:/app/.config/QQ        # QQ 账号数据(登录态)
+      - ./napcat/config:/app/napcat/config # NapCat 网络配置等
