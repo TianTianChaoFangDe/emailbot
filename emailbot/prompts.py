@@ -121,6 +121,13 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
   对"推迟1小时"这类相对修改, 根据列表中该日程的当前时间计算出新的绝对时间
 - delete_schedule: 只需 target_index
 
+【引用消息的对应关系(重要)】
+若用户引用回复了一条历史消息, 判断**被引用的那条消息内容**对应日程列表里的哪一条
+(消息里通常含日程标题/公司名, 注意中英文公司名可能不同, 如"虾皮"="Shopee"),
+把编号填到 quote_target_index; 无法对应则填 null。
+用户引用某条日程相关消息并给出时间(如"把这个安排在今晚10点"), 意图是 update_schedule
+修改那条日程, 而不是 add_schedule 新建。
+
 【时间规则】
 - 所有时间一律转换为带 +08:00 时区的 ISO 8601 格式
 - 相对时间根据 user 消息中提供的当前时间换算(如"明晚7点" -> 明天19:00)
@@ -131,6 +138,7 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
   "answer_datetime": "ISO 8601(+08:00) 或 null",
   "confirm": true 或 false 或 null,
   "target_index": 整数编号或 null,
+  "quote_target_index": 整数编号或 null,
   "event": {
     "title": "简短事件名",
     "event_type": "written_test|ai_coding|ai_interview|interview|assessment|other",
@@ -164,6 +172,7 @@ class IntentResult(BaseModel):
     answer_datetime: str | None = None
     confirm: bool | None = None
     target_index: int | None = None
+    quote_target_index: int | None = None
     event: IntentEvent | None = None
     query_scope: str | None = None
     reply: str = ""

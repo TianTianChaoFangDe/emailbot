@@ -185,6 +185,20 @@ async def cancel_event(event_id: int) -> ScheduleEvent | None:
         return ev
 
 
+def match_event_by_text(
+    text: str, events_list: list[ScheduleEvent]
+) -> ScheduleEvent | None:
+    """文本里出现日程标题/公司名即命中(标题优先, 公司次之)。
+    用于把用户引用的消息内容绑定到具体日程。"""
+    for ev in events_list:
+        if ev.title and ev.title in text:
+            return ev
+    for ev in events_list:
+        if ev.company and ev.company in text:
+            return ev
+    return None
+
+
 async def due_reminders() -> list[ScheduleEvent]:
     """到达提醒窗口且未提醒的日程: start - remind_before <= now < start。"""
     n = now_local()

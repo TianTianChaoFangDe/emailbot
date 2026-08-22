@@ -80,16 +80,49 @@ async def renotify_active() -> None:
         await notify(q.question_text + ASK_HINT)
 
 
+async def find_by_quote(quote: str | None) -> PendingQuestion | None:
+    """引用消息命中某个待答/排队问题(引用的往往就是 bot 发的那条问题消息)。
+
+    匹配依据: 草稿标题/公司名出现在引用内容里, 或引用内容就是问题文本本身。
+    优先 active(pending), 再按入队顺序看 queued。
+    """
+    if not quote:
+        return None
+    async with SessionFactory() as s:
+        rows = (
+            await s.exec(
+                select(PendingQuestion)
+                .where(PendingQuestion.status.in_(["pending", "queued"]))
+                .order_by(PendingQuestion.id)
+            )
+        ).all()
+    for status in ("pending", "queued"):
+        for q in [r for r in rows if r.status == status]:
+            try:
+                draft = json.loads(q.event_draft)
+            except json.JSONDecodeError:
+                continue
+            title = draft.get("title") or ""
+            company = draft.get("company") or ""
+            if (title and title in quote) or (company and company in quote):
+                return q
+            if len(q.question_text) >= 10 and q.question_text[:15] in quote:
+                return q
+    return None
+
+
 async def resolve(
     qid: int, when: datetime, answer_text: str
 ) -> tuple[ScheduleEvent | None, str]:
-    """用户给出了确定时间。按草稿 action 分发:
+    """用户给出了确定时间。pending 和 queued 都允许回答(queued 被引用点名回答)。
+
+    按草稿 action 分发:
     - create(默认): 新建日程
     - update_time: 把指定日程改到该时间(保留原时长平移)
     返回 (日程, action); 问题已失效返回 (None, "")。"""
     async with SessionFactory() as s:
         q = await s.get(PendingQuestion, qid)
-        if not q or q.status != "pending":
+        if not q or q.status not in ("pending", "queued"):
             return None, ""
         draft = json.loads(q.event_draft)
         source_mail_id = q.source_mail_id
@@ -126,10 +159,11 @@ async def resolve(
 async def resolve_confirm(
     qid: int, confirmed: bool, answer_text: str
 ) -> tuple[bool, ScheduleEvent | None]:
-    """处理确认类问题(目前是删除确认)。返回 (是否已了结, 涉及的事件)。"""
+    """处理确认类问题(目前是删除确认)。pending/queued 均可回答。
+    返回 (是否已了结, 涉及的事件)。"""
     async with SessionFactory() as s:
         q = await s.get(PendingQuestion, qid)
-        if not q or q.status != "pending":
+        if not q or q.status not in ("pending", "queued"):
             return False, None
         draft = json.loads(q.event_draft)
         q.status = "answered" if confirmed else "cancelled"
