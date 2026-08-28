@@ -22,18 +22,25 @@ ASK_HINT = "\n回复如「明天下午3点」; 回复「取消」跳过。"
 
 async def enqueue(
     question_text: str, event_draft: dict, source_mail_id: int | None = None
-) -> None:
+) -> int:
+    """入队并尝试立即发出, 返回新问题 id。
+
+    调用方可对比 active().id 判断问题是否被前面的 pending 阻塞(排队中),
+    以便给用户"先回答/取消前一个问题"的提示。
+    """
     async with SessionFactory() as s:
-        s.add(
-            PendingQuestion(
-                question_text=question_text,
-                event_draft=json.dumps(event_draft, ensure_ascii=False),
-                source_mail_id=source_mail_id,
-                created_at=now_local(),
-            )
+        q = PendingQuestion(
+            question_text=question_text,
+            event_draft=json.dumps(event_draft, ensure_ascii=False),
+            source_mail_id=source_mail_id,
+            created_at=now_local(),
         )
+        s.add(q)
         await s.commit()
+        await s.refresh(q)
+        qid = q.id
     await promote_next()
+    return qid
 
 
 async def active() -> PendingQuestion | None:
@@ -217,5 +224,6 @@ async def expire_old() -> None:
         titles = [json.loads(q.event_draft).get("title", "?") for q in rows]
     for t in titles:
         await notify(f"⌛ 关于「{t}」的询问超过 {settings.pending_expire_hours} 小时未回复, 已跳过。")
-    if titles:
-        await promote_next()
+    # 自愈: 正常流转各出口都会 promote, 走到这还有 "无 pending 但有 queued"
+    # 说明中间环节出过异常(如过期通知发送失败), 补一次 promote 防队列卡死
+    await promote_next()

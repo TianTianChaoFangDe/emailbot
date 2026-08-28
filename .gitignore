@@ -9,3 +9,4 @@ __pycache__/
 
 # 部署手册含服务器细节, 只留本地
 DEPLOY.md
+OPS.md

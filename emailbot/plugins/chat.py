@@ -43,6 +43,21 @@ async def _say(text: str) -> None:
     await chat.finish(text)
 
 
+async def _hint_if_blocked(qid: int) -> None:
+    """入队后若问题没被立即发出(队列被前面的问题占住), 提示用户如何疏通。
+
+    队列是单通道: 前一个问题不答, 后面的永远发不出。不提示的话用户会以为
+    指令被吞了(2026-08-28 事故: 删除确认排队 8 条, 用户零反馈)。
+    """
+    pending = await askq.active()
+    if pending is not None and pending.id != qid:
+        await _say(
+            "⏳ 收到~ 不过我前面还有个问题在等你回答:\n"
+            f"{pending.question_text}\n"
+            "先回答它(或回复「取消」跳过), 然后再发一次刚才的指令。"
+        )
+
+
 def _flavor(result: IntentResult) -> str:
     """LLM 给动作类意图附带的情绪/提醒文案(reply 字段)。"""
     r = (result.reply or "").strip()
@@ -177,6 +192,8 @@ async def _(event: PrivateMessageEvent, bot: Bot):
             if not done:
                 await _say("该问题已失效。")
             if result.confirm:
+                if ev is None:  # 重复确认(如队列疏通后补发)目标已被删过
+                    await _say("这条日程已经不在了(可能之前已删除) ✅")
                 await _say(f"🗑 已删除日程:\n{events.render_event(ev)}{_flavor(result)}")
             await _say("好的, 不删了 ✅")
 
@@ -218,7 +235,7 @@ async def _(event: PrivateMessageEvent, bot: Bot):
             await _say(f"✅ 已改期:\n{events.render_event(ev)}{warn}{_flavor(result)}")
         if start is None:
             # 复用询问队列: 先记下来, 问用户时间
-            await askq.enqueue(
+            qid = await askq.enqueue(
                 f"📝 已记下「{ie.title}」, 你想安排在什么时候?",
                 {
                     "title": ie.title,
@@ -227,6 +244,7 @@ async def _(event: PrivateMessageEvent, bot: Bot):
                     "notes": ie.notes,
                 },
             )
+            await _hint_if_blocked(qid)
             return  # 问题已由 promote_next 发出(notify 内会记历史)
         if start < now - timedelta(minutes=5):
             await _say("这个时间已经过去了诶, 说一个未来的时间吧")
@@ -253,10 +271,11 @@ async def _(event: PrivateMessageEvent, bot: Bot):
         new_end = parse_iso(result.event.end) if result.event else None
         if new_start is None:
             # 用户没说改到什么时候 -> 入队询问
-            await askq.enqueue(
+            qid = await askq.enqueue(
                 f"📝 想把「{target.title}」(原定 {fmt(target.start_time)})改到什么时候?",
                 {"action": "update_time", "event_id": target.id},
             )
+            await _hint_if_blocked(qid)
             return
         if new_start < now - timedelta(minutes=5):
             await _say("这个时间已经过去了诶, 说一个未来的时间吧")
@@ -271,12 +290,13 @@ async def _(event: PrivateMessageEvent, bot: Bot):
         target = bound_ev or _pick(result.target_index, upcoming)
         if target is None:
             await _say(NOT_FOUND)
-        await askq.enqueue(
+        qid = await askq.enqueue(
             "🗑 确认删除这条日程吗?\n"
             f"{events.render_event(target)}\n"
             "回复「确认」删除, 回复「取消」保留。",
             {"action": "delete", "event_id": target.id},
         )
+        await _hint_if_blocked(qid)
         return
 
     # 6. 查询日程
