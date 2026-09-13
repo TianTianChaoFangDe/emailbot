@@ -99,7 +99,7 @@ def _build_notification(
             items = "、".join(f"「{c.title}」({fmt(c.start_time)})" for c in conflicts)
             lines.append(f"    ⚠️ 和 {items} 时间撞了")
     for t in asked:
-        lines.append(f"❓ 时间待定: {t}(稍后会问你安排)")
+        lines.append(f"❓ 时间待定: {t}(已单独发消息问你安排, 可随时回复)")
     return "\n".join(lines)
 
 

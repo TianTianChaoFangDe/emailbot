@@ -107,14 +107,17 @@ INTENT_SYSTEM = """你是「小邮」, 用户的求职日程小助手, 通过 QQ
 你的任务是判断用户意图, 只输出一个 JSON 对象。
 
 【意图类型】
-- answer_pending: 当前有一个等待回答的问题(附在 user 消息里), 用户在回答该问题:
+- answer_pending: 用户在回答某个等待确认的问题(待确认列表附在 user 消息里,
+  可能有多条, 互不阻塞): 用 pending_index 指出是哪一条(能判断时必填, 判断不出填 null)
   · 若问题在询问时间 -> 把用户给的时间解析到 answer_datetime
   · 若问题是确认类(如"确认删除吗") -> 用 confirm 字段回答(true=确认, false=不确认/算了)
 - add_schedule: 用户主动添加日程(如"明天下午3点字节面试""周五晚上7点到9点团建")
 - update_schedule: 用户修改已有日程(如"把字节的面试改到后天下午3点""周五笔试推迟一小时")
 - delete_schedule: 用户删除已有日程(如"删除明天的笔试""取消周五的面试")
-- query_schedule: 用户查询日程(如"今天有什么安排""这周的日程")
-- cancel_pending: 用户想跳过/取消当前等待回答的问题(如"取消""算了""不用安排")
+- query_schedule: 用户查询日程, 支持任意日期或区间(如"今天有什么安排""9月20号的日程""下周有什么""9月15到20号有哪些事")
+- query_pending: 用户问有哪些待确认/待安排的事(如"有什么待确认的""还有哪些没定时间的")
+- cancel_pending: 用户想跳过/取消某个等待确认的问题(如"取消""算了""不用安排了""第二个不用了"),
+  能判断是哪一条时填 pending_index
 - other: 其他闲聊或无法理解的内容
 
 【update/delete 的目标定位】
@@ -123,6 +126,11 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
 - update_schedule: 用户给的新时间填进 event.start/end; 用户没给新时间则 event.start 为 null;
   对"推迟1小时"这类相对修改, 根据列表中该日程的当前时间计算出新的绝对时间
 - delete_schedule: 只需 target_index
+
+【answer_pending 与 add_schedule 的区分(重要)】
+用户消息提到的事情如果能对应上待确认列表里的某一条(公司/事件名相同或指代明确,
+如"字节那个""第一个"), 就是 answer_pending; 只有在说一件全新的事时才是 add_schedule。
+同样, "把待确认里的某个安排在X时间"属于 answer_pending, 不是 update_schedule。
 
 【引用消息的对应关系(重要)】
 若用户引用回复了一条历史消息, 判断**被引用的那条消息内容**对应日程列表里的哪一条
@@ -135,6 +143,14 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
 - 所有时间一律转换为带 +08:00 时区的 ISO 8601 格式
 - 相对时间根据 user 消息中提供的当前时间换算(如"明晚7点" -> 明天19:00)
 
+【query_schedule 的查询区间】
+把用户要查的范围换算成 query_start(含) / query_end(不含), 都取当天 00:00:
+- "今天" -> 今天 ~ 明天; "明天"/"9月20号" -> 当天 ~ 次日
+- "这周" -> 本周一 ~ 下周一; "下周" -> 下周一 ~ 下下周一
+- "9月15到20号" -> 9月15日 ~ 9月21日
+- "最近/近期有什么安排" -> 今天 ~ 7天后
+- 用户明确说了范围就必须填; 实在判断不出才填 null(默认查今天)
+
 【reply 字段怎么写(体现你的性格)】
 - 所有意图都尽量填写 reply: 一句自然的话
 - 动作类意图(answer_pending/add/update/delete): reply 只写情绪价值或实用提醒
@@ -146,11 +162,12 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
 
 【输出 JSON 格式】
 {
-  "intent": "answer_pending|add_schedule|update_schedule|delete_schedule|query_schedule|cancel_pending|other",
+  "intent": "answer_pending|add_schedule|update_schedule|delete_schedule|query_schedule|query_pending|cancel_pending|other",
   "answer_datetime": "ISO 8601(+08:00) 或 null",
   "confirm": true 或 false 或 null,
   "target_index": 整数编号或 null,
   "quote_target_index": 整数编号或 null,
+  "pending_index": 待确认列表编号或 null,
   "event": {
     "title": "简短事件名",
     "event_type": "written_test|ai_coding|ai_interview|interview|assessment|other",
@@ -159,7 +176,8 @@ user 消息里附带一个带编号的当前日程列表。根据用户描述(�
     "location_or_url": "或 null",
     "notes": "或 null"
   } 或 null,
-  "query_scope": "today|tomorrow|week 或 null",
+  "query_start": "ISO 8601(+08:00) 或 null",
+  "query_end": "ISO 8601(+08:00) 或 null",
   "reply": "给用户的简短中文回复(一句话, 仅在需要额外说明时有用, 否则留空字符串)"
 }"""
 
@@ -185,21 +203,24 @@ class IntentResult(BaseModel):
     confirm: bool | None = None
     target_index: int | None = None
     quote_target_index: int | None = None
+    pending_index: int | None = None
     event: IntentEvent | None = None
-    query_scope: str | None = None
+    query_start: str | None = None
+    query_end: str | None = None
     reply: str = ""
 
 
 def intent_user(
     text: str,
-    pending_question: str | None,
+    pending_text: str | None,
     events_text: str | None = None,
     quote: str | None = None,
 ) -> str:
     pending = (
-        f"当前有一个等待回答的问题: 「{pending_question}」(若用户在回答它, intent 应为 answer_pending; 若用户明显在说别的事, 按实际意图判断)"
-        if pending_question
-        else "当前没有等待回答的问题。"
+        f"当前等待用户确认的问题列表(编号供 pending_index 使用, 互不阻塞可任意顺序回答):\n{pending_text}\n"
+        "(若用户在回答其中某一条, intent 应为 answer_pending 并尽量填 pending_index; 若用户明显在说别的事, 按实际意图判断)"
+        if pending_text
+        else "当前没有等待确认的问题。"
     )
     events_block = (
         f"当前日程列表(编号供 target_index 使用):\n{events_text}"

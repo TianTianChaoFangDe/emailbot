@@ -75,4 +75,4 @@ async def _on_bot_connect(bot):
         id="mail_poll_on_connect",
         replace_existing=True,
     )
-    await askq.renotify_active()
+    await askq.renotify_open()

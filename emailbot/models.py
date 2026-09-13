@@ -63,9 +63,11 @@ class ChatMessage(SQLModel, table=True):
 
 
 class PendingQuestion(SQLModel, table=True):
-    """待回答询问(单 active 队列): 时间不确定/窗口过大时向用户发问。
+    """待确认问题(列表语义): 时间不确定/窗口过大/需确认时向用户发问。
 
-    status 流转: queued -> pending(已发出) -> answered / expired / cancelled
+    所有待确认问题平铺共存、互不阻塞, 入列即发出, 可按任意顺序回答。
+    status 流转: pending -> answered / expired / cancelled
+    (queued 为旧版单 active 队列的遗留状态, 一律视作 pending)
     """
 
     id: int | None = Field(default=None, primary_key=True)

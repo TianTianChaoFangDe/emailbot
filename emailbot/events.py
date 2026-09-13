@@ -56,6 +56,11 @@ async def add_event(
     return ev
 
 
+async def get_event(event_id: int) -> ScheduleEvent | None:
+    async with SessionFactory() as s:
+        return await s.get(ScheduleEvent, event_id)
+
+
 async def events_between(
     start: datetime, end: datetime, status: str = "active"
 ) -> list[ScheduleEvent]:

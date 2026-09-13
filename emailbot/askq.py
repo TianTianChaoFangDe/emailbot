@@ -1,14 +1,15 @@
-"""询问队列状态机(单 active): 时间不确定/窗口过大时向用户发问。
+"""待确认列表: 时间不确定/窗口过大/需用户确认时产生的问题。
 
-流转: enqueue -> queued -(无 active 时 promote)-> pending(已发出)
-       pending -> answered / cancelled / expired -> promote_next
-任意时刻最多一条 pending, 用户回复永远只匹配当前这条, 避免多问混淆。
+列表语义(非队列): 每个问题入列后立即发给用户, 所有待确认问题平铺共存,
+用户可按任意顺序回答任意一条(自然语言点名或引用回复), 互不阻塞。
+status: pending(待回答) -> answered / cancelled / expired
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 
-from sqlmodel import select
+from sqlmodel import func, select
 
 from . import events
 from .config import get_settings
@@ -17,111 +18,130 @@ from .models import PendingQuestion, ScheduleEvent
 from .notify import notify
 from .timetz import now_local
 
-ASK_HINT = "\n回复如「明天下午3点」; 回复「取消」跳过。"
+ASK_HINT = "\n回复时间即可安排(如「明天下午3点」); 回复「取消」跳过; 发「待确认」可查看全部待办。"
+
+# 历史遗留: 旧版单 active 队列里没发出的问题状态为 queued, 一律视作待确认
+_OPEN = ("pending", "queued")
 
 
 async def enqueue(
     question_text: str, event_draft: dict, source_mail_id: int | None = None
 ) -> int:
-    """入队并尝试立即发出, 返回新问题 id。
-
-    调用方可对比 active().id 判断问题是否被前面的 pending 阻塞(排队中),
-    以便给用户"先回答/取消前一个问题"的提示。
-    """
+    """入列并立即发出, 返回新问题 id。不再排队, 与其他待确认问题互不阻塞。"""
     async with SessionFactory() as s:
         q = PendingQuestion(
+            status="pending",
             question_text=question_text,
             event_draft=json.dumps(event_draft, ensure_ascii=False),
             source_mail_id=source_mail_id,
             created_at=now_local(),
+            asked_at=now_local(),
         )
         s.add(q)
         await s.commit()
         await s.refresh(q)
         qid = q.id
-    await promote_next()
+    await notify(question_text + ASK_HINT)
     return qid
 
 
-async def active() -> PendingQuestion | None:
+async def list_open() -> list[PendingQuestion]:
+    """全部待确认问题, 按入列先后排序(编号与展示一致)。"""
     async with SessionFactory() as s:
         rows = await s.exec(
             select(PendingQuestion)
-            .where(PendingQuestion.status == "pending")
+            .where(PendingQuestion.status.in_(_OPEN))
             .order_by(PendingQuestion.id)
         )
-        return rows.first()
+        return list(rows.all())
 
 
-async def promote_next() -> None:
-    """无 active 时把最早的 queued 提为 pending 并发给用户。"""
-    async with SessionFactory() as s:
-        has = (
-            await s.exec(
-                select(PendingQuestion.id).where(PendingQuestion.status == "pending")
-            )
-        ).first()
-        if has:
-            return
-        nxt = (
-            await s.exec(
-                select(PendingQuestion)
-                .where(PendingQuestion.status == "queued")
-                .order_by(PendingQuestion.id)
-            )
-        ).first()
-        if not nxt:
-            return
-        nxt.status = "pending"
-        nxt.asked_at = now_local()
-        s.add(nxt)
-        await s.commit()
-        text = nxt.question_text
-    await notify(text + ASK_HINT)
+def _draft(q: PendingQuestion) -> dict:
+    try:
+        return json.loads(q.event_draft)
+    except json.JSONDecodeError:
+        return {}
 
 
-async def renotify_active() -> None:
-    """bot 重新连上 QQ 时, 重发当前 pending 问题(掉线期间的通知可能已丢失)。"""
-    q = await active()
-    if q:
-        await notify(q.question_text + ASK_HINT)
+async def display_title(q: PendingQuestion) -> str:
+    """问题对应的日程标题: 草稿 title -> 按 event_id 查日程 -> 问题文本「」兜底。"""
+    draft = _draft(q)
+    if draft.get("title"):
+        return draft["title"]
+    if draft.get("event_id"):
+        ev = await events.get_event(draft["event_id"])
+        if ev:
+            return ev.title
+    m = re.search(r"「(.+?)」", q.question_text)
+    return m.group(1) if m else "?"
+
+
+def action_of(q: PendingQuestion) -> str:
+    return _draft(q).get("action", "create")
+
+
+async def render_pending(qs: list[PendingQuestion]) -> str:
+    """待确认列表的编号展示。同一函数用于用户可见列表与 LLM prompt,
+    保证用户说的「第X个」和 pending_index 对齐。"""
+    lines = []
+    for i, q in enumerate(qs, 1):
+        draft = _draft(q)
+        action = draft.get("action", "create")
+        title = await display_title(q)
+        if action == "delete":
+            lines.append(f"{i}. [待确认删除] 「{title}」")
+        elif action == "update_time":
+            lines.append(f"{i}. [待改期] 「{title}」")
+        else:
+            company = f"({draft['company']})" if draft.get("company") else ""
+            note = draft.get("notes") or "时间待定"
+            lines.append(f"{i}. 「{title}」{company} —— {note}")
+    return "\n".join(lines)
+
+
+async def renotify_open() -> None:
+    """bot 重新连上 QQ 时, 重发待确认问题(掉线期间的通知可能已丢失)。
+    多条时合并成一条消息, 避免重连刷屏。"""
+    qs = await list_open()
+    if not qs:
+        return
+    if len(qs) == 1:
+        await notify(qs[0].question_text + ASK_HINT)
+        return
+    await notify(
+        f"🔔 还有 {len(qs)} 个安排等你确认:\n"
+        + await render_pending(qs)
+        + "\n回复如「字节那个安排在明天下午3点」, 或「取消第X个」。"
+    )
 
 
 async def find_by_quote(quote: str | None) -> PendingQuestion | None:
-    """引用消息命中某个待答/排队问题(引用的往往就是 bot 发的那条问题消息)。
+    """引用消息命中某个待确认问题(引用的往往就是 bot 发的那条问题消息)。
 
-    匹配依据: 草稿标题/公司名出现在引用内容里, 或引用内容就是问题文本本身。
-    优先 active(pending), 再按入队顺序看 queued。
+    匹配依据: 草稿标题/公司名(缺失时按 event_id 查日程标题)出现在引用内容里,
+    或引用内容就是问题文本本身。
     """
     if not quote:
         return None
-    async with SessionFactory() as s:
-        rows = (
-            await s.exec(
-                select(PendingQuestion)
-                .where(PendingQuestion.status.in_(["pending", "queued"]))
-                .order_by(PendingQuestion.id)
-            )
-        ).all()
-    for status in ("pending", "queued"):
-        for q in [r for r in rows if r.status == status]:
-            try:
-                draft = json.loads(q.event_draft)
-            except json.JSONDecodeError:
-                continue
-            title = draft.get("title") or ""
-            company = draft.get("company") or ""
-            if (title and title in quote) or (company and company in quote):
-                return q
-            if len(q.question_text) >= 10 and q.question_text[:15] in quote:
-                return q
+    qs = await list_open()
+    for q in qs:
+        draft = _draft(q)
+        title = draft.get("title") or ""
+        company = draft.get("company") or ""
+        if not title and draft.get("event_id"):
+            ev = await events.get_event(draft["event_id"])
+            title = ev.title if ev else ""
+        if (title and title in quote) or (company and company in quote):
+            return q
+        if len(q.question_text) >= 10 and q.question_text[:15] in quote:
+            return q
     return None
 
 
 async def resolve(
     qid: int, when: datetime, answer_text: str
 ) -> tuple[ScheduleEvent | None, str]:
-    """用户给出了确定时间。pending 和 queued 都允许回答(queued 被引用点名回答)。
+    """用户给出了确定时间。
 
     按草稿 action 分发:
     - create(默认): 新建日程
@@ -129,7 +149,7 @@ async def resolve(
     返回 (日程, action); 问题已失效返回 (None, "")。"""
     async with SessionFactory() as s:
         q = await s.get(PendingQuestion, qid)
-        if not q or q.status not in ("pending", "queued"):
+        if not q or q.status not in _OPEN:
             return None, ""
         draft = json.loads(q.event_draft)
         source_mail_id = q.source_mail_id
@@ -142,7 +162,6 @@ async def resolve(
     action = draft.get("action", "create")
     if action == "update_time":
         ev = await events.update_event(draft["event_id"], start_time=when)
-        await promote_next()
         return ev, action
 
     duration = draft.pop("duration_minutes", None)
@@ -159,18 +178,17 @@ async def resolve(
         source="ask",
         source_mail_id=source_mail_id,
     )
-    await promote_next()
     return ev, action
 
 
 async def resolve_confirm(
     qid: int, confirmed: bool, answer_text: str
 ) -> tuple[bool, ScheduleEvent | None]:
-    """处理确认类问题(目前是删除确认)。pending/queued 均可回答。
+    """处理确认类问题(目前是删除确认)。
     返回 (是否已了结, 涉及的事件)。"""
     async with SessionFactory() as s:
         q = await s.get(PendingQuestion, qid)
-        if not q or q.status not in ("pending", "queued"):
+        if not q or q.status not in _OPEN:
             return False, None
         draft = json.loads(q.event_draft)
         q.status = "answered" if confirmed else "cancelled"
@@ -182,38 +200,33 @@ async def resolve_confirm(
     ev = None
     if confirmed and draft.get("action") == "delete":
         ev = await events.cancel_event(draft["event_id"])
-    await promote_next()
     return True, ev
 
 
-async def cancel_active() -> PendingQuestion | None:
+async def cancel(qid: int) -> PendingQuestion | None:
+    """取消指定待确认问题。"""
     async with SessionFactory() as s:
-        q = (
-            await s.exec(
-                select(PendingQuestion)
-                .where(PendingQuestion.status == "pending")
-                .order_by(PendingQuestion.id)
-            )
-        ).first()
-        if not q:
+        q = await s.get(PendingQuestion, qid)
+        if not q or q.status not in _OPEN:
             return None
         q.status = "cancelled"
         s.add(q)
         await s.commit()
-    await promote_next()
-    return q
+        return q
 
 
 async def expire_old() -> None:
-    """pending 超过 PENDING_EXPIRE_HOURS 未答 -> 过期并通知, 自动问下一个。"""
+    """待确认超过 PENDING_EXPIRE_HOURS 未答 -> 过期并合并通知。"""
     settings = get_settings()
     cutoff = now_local() - timedelta(hours=settings.pending_expire_hours)
     async with SessionFactory() as s:
         rows = (
             await s.exec(
                 select(PendingQuestion).where(
-                    PendingQuestion.status == "pending",
-                    PendingQuestion.asked_at < cutoff,
+                    PendingQuestion.status.in_(_OPEN),
+                    # 遗留 queued 没有 asked_at, 退用 created_at
+                    func.coalesce(PendingQuestion.asked_at, PendingQuestion.created_at)
+                    < cutoff,
                 )
             )
         ).all()
@@ -221,9 +234,13 @@ async def expire_old() -> None:
             q.status = "expired"
             s.add(q)
         await s.commit()
-        titles = [json.loads(q.event_draft).get("title", "?") for q in rows]
-    for t in titles:
-        await notify(f"⌛ 关于「{t}」的询问超过 {settings.pending_expire_hours} 小时未回复, 已跳过。")
-    # 自愈: 正常流转各出口都会 promote, 走到这还有 "无 pending 但有 queued"
-    # 说明中间环节出过异常(如过期通知发送失败), 补一次 promote 防队列卡死
-    await promote_next()
+        titles = [await display_title(q) for q in rows]
+    if not titles:
+        return
+    if len(titles) == 1:
+        await notify(f"⌛ 关于「{titles[0]}」的询问超过 {settings.pending_expire_hours} 小时未回复, 已跳过。")
+    else:
+        items = "、".join(f"「{t}」" for t in titles)
+        await notify(
+            f"⌛ {items} 这 {len(titles)} 个询问超过 {settings.pending_expire_hours} 小时未回复, 已一并跳过。"
+        )
